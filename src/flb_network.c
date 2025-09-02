@@ -151,6 +151,8 @@ void flb_net_setup_init(struct flb_net_setup *net)
     net->connect_timeout = 10;
     net->io_timeout = 0; /* Infinite time */
     net->source_address = NULL;
+    net->backlog = FLB_NETWORK_DEFAULT_BACKLOG_SIZE;
+    net->proxy_env_ignore = FLB_FALSE;
 }
 
 int flb_net_host_set(const char *plugin_name, struct flb_net_host *host, const char *address)
@@ -477,6 +479,12 @@ static int net_connect_sync(int fd, const struct sockaddr *addr, socklen_t addrl
                       fd, host, port);
             goto exit_error;
         }
+
+        /* check the connection status */
+        socket_errno = flb_socket_error(fd);
+        if (socket_errno != 0) {
+            goto exit_error;
+        }
     }
 
     /*
@@ -669,6 +677,12 @@ static void flb_net_dns_lookup_context_drop(struct flb_dns_lookup_context *looku
 {
     if (!lookup_context->dropped) {
         lookup_context->dropped = FLB_TRUE;
+
+        if (lookup_context->ares_socket_registered) {
+            mk_event_del(lookup_context->event_loop,
+                         &lookup_context->response_event);
+            lookup_context->ares_socket_registered = FLB_FALSE;
+        }
 
         mk_list_del(&lookup_context->_head);
         mk_list_add(&lookup_context->_head, &lookup_context->dns_ctx->lookups_drop);
@@ -1079,8 +1093,9 @@ static struct flb_dns_lookup_context *flb_net_dns_lookup_context_create(
 
     optmask = ARES_OPT_FLAGS;
 
+    opts.flags = ARES_FLAG_EDNS;
     if (dns_mode == FLB_DNS_USE_TCP) {
-        opts.flags = ARES_FLAG_USEVC;
+        opts.flags |= ARES_FLAG_USEVC;
     }
 
     *result = ares_init_options((ares_channel *) &lookup_context->ares_channel,
@@ -1629,7 +1644,8 @@ int flb_net_tcp_fd_connect(flb_sockfd_t fd, const char *host, unsigned long port
     return ret;
 }
 
-flb_sockfd_t flb_net_server(const char *port, const char *listen_addr, int share_port)
+flb_sockfd_t flb_net_server(const char *port, const char *listen_addr,
+                            int backlog, int share_port)
 {
     flb_sockfd_t fd = -1;
     int ret;
@@ -1662,7 +1678,7 @@ flb_sockfd_t flb_net_server(const char *port, const char *listen_addr, int share
         flb_net_socket_tcp_nodelay(fd);
         flb_net_socket_reset(fd);
 
-        ret = flb_net_bind(fd, rp->ai_addr, rp->ai_addrlen, 128);
+        ret = flb_net_bind(fd, rp->ai_addr, rp->ai_addrlen, backlog);
         if(ret == -1) {
             flb_warn("Cannot listen on %s port %s", listen_addr, port);
             flb_socket_close(fd);

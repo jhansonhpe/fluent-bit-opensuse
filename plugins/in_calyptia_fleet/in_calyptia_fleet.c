@@ -22,6 +22,8 @@
 #include <time.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <errno.h>
+#include <limits.h>
 
 #include <msgpack.h>
 #include <fluent-bit/flb_input.h>
@@ -63,6 +65,8 @@
 static int fleet_cur_chdir(struct flb_in_calyptia_fleet_config *ctx);
 static int get_calyptia_files(struct flb_in_calyptia_fleet_config *ctx,
                               time_t timestamp);
+static void in_calyptia_fleet_destroy(struct flb_in_calyptia_fleet_config *ctx);
+static struct cfl_array *read_glob(const char *path);
 
 #ifndef FLB_SYSTEM_WINDOWS
 
@@ -294,7 +298,6 @@ static int is_old_fleet_config(struct flb_in_calyptia_fleet_config *ctx, struct 
     flb_sds_t cfgcurname;
     int ret = FLB_FALSE;
 
-
     if (cfg == NULL) {
         return FLB_FALSE;
     }
@@ -318,40 +321,44 @@ static int is_old_fleet_config(struct flb_in_calyptia_fleet_config *ctx, struct 
     return ret;
 }
 
-static int is_timestamped_fleet_config_path(struct flb_in_calyptia_fleet_config *ctx, const char *path)
+/**
+ * Returns the timestamp of the fleet config file if it is a timestamped file,
+ * or 0 if it is not a timestamped file.
+ */
+static time_t fleet_config_path_timestamp(struct flb_in_calyptia_fleet_config *ctx, const char *path)
 {
     char *fname;
     char *end;
-    long val;
+    long long val;
 
     if (path == NULL || ctx == NULL) {
-        return FLB_FALSE;
+        return 0;
     }
 
     fname = strrchr(path, PATH_SEPARATOR[0]);
 
     if (fname == NULL) {
-        return FLB_FALSE;
+        return 0;
     }
 
     fname++;
 
     errno = 0;
-    val = strtol(fname, &end, 10);
+    val = strtoll(fname, &end, 10);
     if ((errno == ERANGE && (val == LONG_MAX || val == LONG_MIN)) || (errno != 0 && val == 0)) {
-        return FLB_FALSE;
+        return 0;
     }
 
     if (ctx->fleet_config_legacy_format) {
         if (strcmp(end, ".conf") == 0) {
-           return FLB_TRUE;
+           return (time_t)val;
         }
     }
     else if (strcmp(end, ".yaml") == 0) {
-        return FLB_TRUE;
+        return (time_t)val;
     }
 
-    return FLB_FALSE;
+    return 0;
 }
 
 static int is_timestamped_fleet_config(struct flb_in_calyptia_fleet_config *ctx, struct flb_config *cfg)
@@ -364,7 +371,7 @@ static int is_timestamped_fleet_config(struct flb_in_calyptia_fleet_config *ctx,
         return FLB_FALSE;
     }
 
-    return is_timestamped_fleet_config_path(ctx, cfg->conf_path_file);
+    return fleet_config_path_timestamp(ctx, cfg->conf_path_file) > 0;
 }
 
 static int is_fleet_config(struct flb_in_calyptia_fleet_config *ctx, struct flb_config *cfg)
@@ -633,8 +640,6 @@ static int execute_reload(struct flb_in_calyptia_fleet_config *ctx, flb_sds_t cf
         flb_plg_error(ctx->ins, "unable to change to configuration directory");
     }
 
-    fleet_cur_chdir(ctx);
-
     pthread_attr_init(&ptha);
     pthread_attr_setdetachstate(&ptha, PTHREAD_CREATE_DETACHED);
     pthread_create(&pth, &ptha, do_reload, reload);
@@ -857,6 +862,7 @@ static struct flb_http_client *fleet_http_do(struct flb_in_calyptia_fleet_config
     size_t b_sent;
     struct flb_connection *u_conn;
     struct flb_http_client *client;
+    flb_sds_t config_version;
 
     if (ctx == NULL || url == NULL) {
         return NULL;
@@ -877,6 +883,13 @@ static struct flb_http_client *fleet_http_do(struct flb_in_calyptia_fleet_config
     }
 
     flb_http_buffer_size(client, ctx->max_http_buffer_size);
+
+    config_version = flb_sds_create_size(32);
+    flb_sds_printf(&config_version, "%ld", ctx->config_timestamp);
+    flb_http_add_header(client,
+                         FLEET_HEADERS_CONFIG_VERSION, sizeof(FLEET_HEADERS_CONFIG_VERSION) -1,
+                         config_version, flb_sds_len(config_version));
+    flb_sds_destroy(config_version);
 
     flb_http_add_header(client,
                         CALYPTIA_HEADERS_PROJECT, sizeof(CALYPTIA_HEADERS_PROJECT) - 1,
@@ -958,6 +971,74 @@ static int get_calyptia_fleet_id_by_name(struct flb_in_calyptia_fleet_config *ct
     return 0;
 }
 
+/**
+ * Checks for existing config files having timestamps at or after new_timestamp.
+ * @param ctx Fleet configuration context
+ * @param new_timestamp Timestamp to compare against existing files
+ * @return FLB_TRUE if new_timestamp is newer than all existing files, FLB_FALSE otherwise.
+ */
+static int check_timestamp_is_newer(struct flb_in_calyptia_fleet_config *ctx, time_t new_timestamp)
+{
+    flb_sds_t base_dir = NULL;
+    flb_sds_t glob_pattern = NULL;
+    struct cfl_array *files = NULL;
+    size_t idx;
+    int ret;
+    time_t file_timestamp;
+    const char *file_extension;
+
+    if (generate_base_fleet_directory(ctx, &base_dir) == NULL) {
+        return FLB_FALSE;
+    }
+
+    /* Create glob pattern to match all timestamped files */
+    glob_pattern = flb_sds_create_size(0);
+    if (glob_pattern == NULL) {
+        flb_sds_destroy(base_dir);
+        return FLB_FALSE;
+    }
+
+    file_extension = ctx->fleet_config_legacy_format ? "*.conf" : "*.yaml";
+    if (flb_sds_printf(&glob_pattern, "%s" PATH_SEPARATOR "%s", base_dir, file_extension) == NULL) {
+        flb_sds_destroy(glob_pattern);
+        flb_sds_destroy(base_dir);
+        return FLB_FALSE;
+    }
+
+    files = read_glob(glob_pattern);
+    if (files == NULL) {
+        /* No existing files found - could be empty directory or glob failure */
+        flb_plg_debug(ctx->ins, "no existing config files found in %s", base_dir);
+        flb_sds_destroy(base_dir);
+        flb_sds_destroy(glob_pattern);
+        return FLB_TRUE;
+    }
+
+    /* Check each existing file's timestamp */
+    ret = FLB_TRUE;
+    for (idx = 0; idx < files->entry_count; idx++) {
+        file_timestamp = fleet_config_path_timestamp(ctx, files->entries[idx]->data.as_string);
+        if (file_timestamp == 0) {
+            continue;
+        }
+
+        /* Check if existing file timestamp is greater than or equal to new timestamp */
+        if (file_timestamp >= new_timestamp) {
+            flb_plg_debug(ctx->ins,
+                          "existing file with timestamp %ld >= new timestamp %ld",
+                          (long long)file_timestamp, (long long)new_timestamp);
+            ret = FLB_FALSE;
+            break;
+        }
+    }
+
+    cfl_array_destroy(files);
+    flb_sds_destroy(base_dir);
+    flb_sds_destroy(glob_pattern);
+
+    return ret;
+}
+
 static int get_calyptia_file(struct flb_in_calyptia_fleet_config *ctx,
                              flb_sds_t url,
                              const char *hdr,
@@ -994,6 +1075,18 @@ static int get_calyptia_file(struct flb_in_calyptia_fleet_config *ctx,
         // Assuming this is the base Fleet config file
         flb_strptime(fbit_last_modified, "%a, %d %B %Y %H:%M:%S GMT", &tm_last_modified);
         last_modified = mktime(&tm_last_modified.tm);
+
+        /* Check if there are existing files with timestamps >= new timestamp */
+        if (check_timestamp_is_newer(ctx, last_modified) == FLB_FALSE) {
+            flb_plg_debug(ctx->ins, "not creating file with timestamp %lld since it is not newer than existing files",
+                         (long long)last_modified);
+            ret = -1;
+            goto client_error;
+        }
+        else {
+            flb_plg_info(ctx->ins, "creating config file with timestamp %lld",
+                         (long long)last_modified);
+        }
 
         fname = time_fleet_config_filename(ctx, last_modified);
     }
@@ -1348,7 +1441,7 @@ static int calyptia_config_delete_old(struct flb_in_calyptia_fleet_config *ctx)
     }
 
     for (idx = 0; idx < confs->entry_count; idx++) {
-        if (is_timestamped_fleet_config_path(ctx, confs->entries[idx]->data.as_string) == FLB_TRUE) {
+        if (fleet_config_path_timestamp(ctx, confs->entries[idx]->data.as_string) > 0) {
             cfl_array_append_string(tconfs, confs->entries[idx]->data.as_string);
         }
     }
@@ -1414,7 +1507,7 @@ static flb_sds_t calyptia_config_get_newest(struct flb_in_calyptia_fleet_config 
 
     for (idx = inis->entry_count-1; idx >= 0; idx--) {
         curconf = inis->entries[idx]->data.as_string;
-        if (is_timestamped_fleet_config_path(ctx, curconf)) {
+        if (fleet_config_path_timestamp(ctx, curconf) > 0) {
             cfgnewname = flb_sds_create(curconf);
             break;
         }
@@ -1617,10 +1710,17 @@ static flb_sds_t get_fleet_id_from_header(struct flb_in_calyptia_fleet_config *c
     flb_sds_t fleet_id;
     flb_sds_t name;
     struct flb_cf *cf_hdr;
+    flb_sds_t cfgheadername;
 
 
     if (exists_header_fleet_config(ctx)) {
-        cf_hdr = flb_cf_create_from_file(NULL, hdr_fleet_config_filename(ctx));
+        cfgheadername = hdr_fleet_config_filename(ctx);
+        if (cfgheadername == NULL) {
+            return NULL;
+        }
+
+        cf_hdr = flb_cf_create_from_file(NULL, cfgheadername);
+        flb_sds_destroy(cfgheadername);
 
         if (cf_hdr == NULL) {
             return NULL;
@@ -2207,7 +2307,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
     /* Load the config map */
     ret = flb_input_config_map_set(in, (void *) ctx);
     if (ret == -1) {
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         flb_plg_error(in, "unable to load configuration");
         return -1;
     }
@@ -2218,7 +2318,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
         if (tmpdir == NULL) {
             flb_plg_error(in, "unable to find temporary directory (%%TEMP%%).");
-            flb_free(ctx);
+            in_calyptia_fleet_destroy(ctx);
             return -1;
         }
 
@@ -2226,7 +2326,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
         if (ctx->config_dir == NULL) {
             flb_plg_error(in, "unable to allocate config-dir.");
-            flb_free(ctx);
+            in_calyptia_fleet_destroy(ctx);
             return -1;
         }
         flb_sds_printf(&ctx->config_dir, "%s" PATH_SEPARATOR "%s", tmpdir, "calyptia-fleet");
@@ -2244,7 +2344,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
     if (!ctx->u) {
         flb_plg_error(ctx->ins, "could not initialize upstream");
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2266,6 +2366,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
     /* create fleet directory before creating the fleet header. */
     if (create_fleet_directory(ctx) != 0) {
         flb_plg_error(ctx->ins, "unable to create fleet directories");
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2294,8 +2395,7 @@ static int in_calyptia_fleet_init(struct flb_input_instance *in,
 
     if (ret == -1) {
         flb_plg_error(ctx->ins, "could not initialize collector for fleet input plugin");
-        flb_upstream_destroy(ctx->u);
-        flb_free(ctx);
+        in_calyptia_fleet_destroy(ctx);
         return -1;
     }
 
@@ -2318,10 +2418,11 @@ static void cb_in_calyptia_fleet_resume(void *data, struct flb_config *config)
     flb_input_collector_resume(ctx->collect_fd, ctx->ins);
 }
 
-static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
+static void in_calyptia_fleet_destroy(struct flb_in_calyptia_fleet_config *ctx)
 {
-    (void) *config;
-    struct flb_in_calyptia_fleet_config *ctx = (struct flb_in_calyptia_fleet_config *)data;
+    if (!ctx) {
+        return;
+    }
 
     if (ctx->fleet_url) {
         flb_sds_destroy(ctx->fleet_url);
@@ -2335,10 +2436,21 @@ static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
         flb_sds_destroy(ctx->fleet_id);
     }
 
-    flb_input_collector_delete(ctx->collect_fd, ctx->ins);
-    flb_upstream_destroy(ctx->u);
-    flb_free(ctx);
+    if (ctx->collect_fd >= 0) {
+        flb_input_collector_delete(ctx->collect_fd, ctx->ins);
+    }
 
+    if (ctx->u) {
+        flb_upstream_destroy(ctx->u);
+    }
+
+    flb_free(ctx);
+}
+
+static int in_calyptia_fleet_exit(void *data, struct flb_config *config)
+{
+    (void) *config;
+    in_calyptia_fleet_destroy((struct flb_in_calyptia_fleet_config *)data);
     return 0;
 }
 

@@ -48,9 +48,7 @@
 #include "win32.h"
 #endif
 
-#ifdef FLB_HAVE_UNICODE_ENCODER
 #include <fluent-bit/flb_unicode.h>
-#endif
 
 #include <cfl/cfl.h>
 
@@ -445,8 +443,8 @@ static int process_content(struct flb_tail_file *file, size_t *bytes)
     time_t now = time(NULL);
     struct flb_time out_time = {0};
     struct flb_tail_config *ctx;
-#ifdef FLB_HAVE_UNICODE_ENCODER
     char *decoded = NULL;
+#ifdef FLB_HAVE_UNICODE_ENCODER
     size_t decoded_len;
 #endif
 
@@ -485,6 +483,20 @@ static int process_content(struct flb_tail_file *file, size_t *bytes)
         }
     }
 #endif
+    if (ctx->generic_input_encoding_type != FLB_GENERIC_UNSPECIFIED) {
+        original_len = end - data;
+        decoded = NULL;
+        ret = flb_unicode_generic_convert_to_utf8(ctx->generic_input_encoding_name,
+                                                  (unsigned char*)data, (unsigned char**)&decoded,
+                                                  end - data);
+        if (ret > 0) {
+            data = decoded;
+            end  = data + strlen(decoded);
+        }
+        else {
+            flb_plg_error(ctx->ins, "encoding failed '%.*s' with status %d", end - data, data, ret);
+        }
+    }
 
     /* Skip null characters from the head (sometimes introduced by copy-truncate log rotation) */
     while (data < end && *data == '\0') {
@@ -639,12 +651,11 @@ static int process_content(struct flb_tail_file *file, size_t *bytes)
         file->last_processed_bytes += processed_bytes;
     }
 
-#ifdef FLB_HAVE_UNICODE_ENCODER
     if (decoded) {
         flb_free(decoded);
         decoded = NULL;
     }
-#endif
+
     file->parsed = file->buf_len;
 
     if (lines > 0) {
@@ -1406,16 +1417,21 @@ static int adjust_counters(struct flb_tail_config *ctx, struct flb_tail_file *fi
         return FLB_TAIL_ERROR;
     }
 
-    /* Check if the file was truncated */
-    if (file->offset > st.st_size) {
+    int64_t size_delta = st.st_size - file->size;
+    if (size_delta != 0) {
+        file->size = st.st_size;
+    }
+
+    /* Check if the file was truncated by comparing current size with previous size */
+    if (size_delta < 0) {
         offset = lseek(file->fd, 0, SEEK_SET);
         if (offset == -1) {
             flb_errno();
             return FLB_TAIL_ERROR;
         }
 
-        flb_plg_debug(ctx->ins, "inode=%"PRIu64" file truncated %s",
-                      file->inode, file->name);
+        flb_plg_debug(ctx->ins, "adjust_counters: inode=%"PRIu64" file truncated %s (diff: %"PRId64" bytes)",
+                      file->inode, file->name, size_delta);
         file->offset = offset;
         file->buf_len = 0;
 
@@ -1427,8 +1443,8 @@ static int adjust_counters(struct flb_tail_config *ctx, struct flb_tail_file *fi
 #endif
     }
     else {
-        file->size = st.st_size;
-        file->pending_bytes = (st.st_size - file->offset);
+        // Avoid negative pending_bytes when fstat() has stale data and size < offset
+        file->pending_bytes = (st.st_size > file->offset) ? (st.st_size - file->offset) : 0;
     }
 
     return FLB_TAIL_OK;

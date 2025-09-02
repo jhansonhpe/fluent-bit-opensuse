@@ -26,6 +26,7 @@ endmacro()
 # Core
 FLB_RT_CORE_TEST(FLB_COROUTINE_TIMEOUT    "core-timeout.c")
 FLB_RT_CORE_TEST(FLB_INTERNAL_LOGGER      "core_internal_logger.c")
+FLB_RT_CORE_TEST(FLB_DOWNSTREAM_ACCEPT_TIMEOUT "core_accept_timeout.c")
 
 FLB_RT_TEST(FLB_CHUNK_TRACE "core_chunk_trace.c")
 
@@ -58,6 +59,7 @@ if(FLB_OUT_LIB)
   FLB_RT_TEST(FLB_IN_TCP          "in_tcp.c")
   FLB_RT_TEST(FLB_IN_FORWARD       "in_forward.c")
   FLB_RT_TEST(FLB_IN_FLUENTBIT_METRICS "in_fluentbit_metrics.c")
+  FLB_RT_TEST(FLB_IN_PROMETHEUS_TEXTFILE "in_prometheus_textfile.c")
   FLB_RT_TEST(FLB_IN_KUBERNETES_EVENTS "in_kubernetes_events.c")
   if (FLB_IN_SYSTEMD)
     FLB_RT_TEST(FLB_IN_SYSTEMD        "in_systemd.c")
@@ -235,6 +237,7 @@ if(FLB_IN_LIB)
   FLB_RT_TEST(FLB_OUT_S3                "out_s3.c")
   FLB_RT_TEST(FLB_OUT_TD                "out_td.c")
   FLB_RT_TEST(FLB_OUT_INFLUXDB          "out_influxdb.c")
+  FLB_RT_TEST(FLB_OUT_CHRONICLE         "out_chronicle.c")
 
 endif()
 

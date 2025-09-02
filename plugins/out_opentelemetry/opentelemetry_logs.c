@@ -392,7 +392,9 @@ static int append_v1_logs_metadata_and_fields(struct opentelemetry_context *ctx,
     int severity_text_set = FLB_FALSE;
     int severity_number_set = FLB_FALSE;
     int trace_flags_set = FLB_FALSE;
+    size_t attr_count = 0;
     struct flb_ra_value *ra_val;
+    Opentelemetry__Proto__Common__V1__KeyValue **attrs = NULL;
 
     if (ctx == NULL || event == NULL || log_record == NULL) {
         return -1;
@@ -519,10 +521,21 @@ static int append_v1_logs_metadata_and_fields(struct opentelemetry_context *ctx,
     ra_val = flb_ra_get_value_object(ctx->ra_log_meta_otlp_attr, *event->metadata);
     if (ra_val != NULL) {
         if (ra_val->o.type == MSGPACK_OBJECT_MAP) {
-            if (log_record->attributes != NULL) {
-                otlp_kvarray_destroy(log_record->attributes, log_record->n_attributes);
+            attr_count = 0;
+            attrs = msgpack_map_to_otlp_kvarray(&ra_val->o, &attr_count);
+            if (attrs) {
+                if (log_record->attributes != NULL) {
+                    if (otlp_kvarray_append(&log_record->attributes,
+                                            &log_record->n_attributes,
+                                            attrs, attr_count) != 0) {
+                        otlp_kvarray_destroy(attrs, attr_count);
+                    }
+                }
+                else {
+                    log_record->attributes = attrs;
+                    log_record->n_attributes = attr_count;
+                }
             }
-            log_record->attributes = msgpack_map_to_otlp_kvarray(&ra_val->o, &log_record->n_attributes);
         }
         flb_ra_key_value_destroy(ra_val);
     }
@@ -530,10 +543,21 @@ static int append_v1_logs_metadata_and_fields(struct opentelemetry_context *ctx,
         ra_val = flb_ra_get_value_object(ctx->ra_attributes_metadata, *event->metadata);
         if (ra_val != NULL) {
             if (ra_val->o.type == MSGPACK_OBJECT_MAP) {
-                if (log_record->attributes != NULL) {
-                    otlp_kvarray_destroy(log_record->attributes, log_record->n_attributes);
+                attr_count = 0;
+                attrs = msgpack_map_to_otlp_kvarray(&ra_val->o, &attr_count);
+                if (attrs) {
+                    if (log_record->attributes != NULL) {
+                        if (otlp_kvarray_append(&log_record->attributes,
+                                                &log_record->n_attributes,
+                                                attrs, attr_count) != 0) {
+                            otlp_kvarray_destroy(attrs, attr_count);
+                        }
+                    }
+                    else {
+                        log_record->attributes = attrs;
+                        log_record->n_attributes = attr_count;
+                    }
                 }
-                log_record->attributes = msgpack_map_to_otlp_kvarray(&ra_val->o, &log_record->n_attributes);
             }
             flb_ra_key_value_destroy(ra_val);
         }
@@ -924,8 +948,6 @@ int otel_process_logs(struct flb_event_chunk *event_chunk,
     int max_scopes;
     int max_resources;
     int native_otel = FLB_FALSE;
-    int64_t prev_group_resource_id = -1;
-    int64_t prev_group_scope_id = -1;
     int64_t resource_id = -1;
     int64_t scope_id = -1;
     int64_t tmp_resource_id = -1;
@@ -996,11 +1018,6 @@ int otel_process_logs(struct flb_event_chunk *event_chunk,
             /* flag this as a native otel schema */
             native_otel = FLB_TRUE;
 
-            if (resource_id == -1 && prev_group_resource_id >= 0 && prev_group_resource_id == tmp_resource_id) {
-                /* continue with the previous resource */
-                resource_id = prev_group_resource_id;
-                scope_id = prev_group_scope_id;
-            }
 
             /* if we have a new resource_id, start a new resource context */
             if (resource_id != tmp_resource_id) {
@@ -1055,8 +1072,9 @@ start_resource:
                     resource_log->n_scope_logs = 0;
                 }
 
-                /* update the current resource_id */
+                /* update the current resource_id and reset scope_id */
                 resource_id = tmp_resource_id;
+                scope_id = -1;
             }
 
             if (scope_id != tmp_scope_id) {
@@ -1126,8 +1144,6 @@ start_resource:
         else if (record_type == FLB_LOG_EVENT_GROUP_END) {
             /* do nothing */
             ret = FLB_OK;
-            prev_group_resource_id = resource_id;
-            prev_group_scope_id = scope_id;
             resource_id = -1;
             scope_id = -1;
             native_otel = FLB_FALSE;
@@ -1172,6 +1188,8 @@ start_resource:
         if (ret == -1) {
             /* the only possible fail path is a problem with a memory allocation, let's suggest a FLB_RETRY */
             ret = FLB_RETRY;
+            flb_free(log_record);
+            log_records[log_record_count] = NULL;
             break;
         }
 
@@ -1180,6 +1198,11 @@ start_resource:
         if (ret == -1) {
             /* as before, it can only fail on a memory allocation */
             ret = FLB_RETRY;
+            if (log_record->body) {
+                otlp_any_value_destroy(log_record->body);
+            }
+            flb_free(log_record);
+            log_records[log_record_count] = NULL;
             break;
         }
 

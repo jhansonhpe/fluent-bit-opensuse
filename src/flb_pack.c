@@ -64,6 +64,7 @@ int flb_json_tokenise(const char *js, size_t len,
 
     ret = jsmn_parse(&state->parser, js, len,
                      state->tokens, state->tokens_size);
+
     while (ret == JSMN_ERROR_NOMEM) {
         /* Get current size of the array in bytes */
         old_size = state->tokens_size * sizeof(jsmntok_t);
@@ -83,6 +84,7 @@ int flb_json_tokenise(const char *js, size_t len,
                          state->tokens, state->tokens_size);
     }
 
+
     if (ret == JSMN_ERROR_INVAL) {
         return FLB_ERR_JSON_INVAL;
     }
@@ -93,7 +95,8 @@ int flb_json_tokenise(const char *js, size_t len,
         return FLB_ERR_JSON_PART;
     }
 
-    state->tokens_count += ret;
+    /* always use jsmn_parser.toknext to count tokens */
+    state->tokens_count = state->parser.toknext;
     return 0;
 }
 
@@ -113,6 +116,43 @@ static inline int is_float(const char *buf, int len)
     }
 
     return 0;
+}
+
+static inline void pack_numeric_token(msgpack_packer *pck, const char *p, int flen)
+{
+    long long val;
+    unsigned long long u_val;
+
+    if (is_float(p, flen)) {
+        msgpack_pack_double(pck, strtod(p, NULL));
+        return;
+    }
+
+    errno = 0;
+
+    if (*p == '-') {
+        val = strtoll(p, NULL, 10);
+
+        if (errno == ERANGE) {
+            msgpack_pack_double(pck, strtod(p, NULL));
+        }
+        else {
+            msgpack_pack_int64(pck, val);
+        }
+    }
+    else {
+        u_val = strtoull(p, NULL, 10);
+
+        if (errno == ERANGE) {
+            msgpack_pack_double(pck, strtod(p, NULL));
+        }
+        else if (u_val <= LLONG_MAX) {
+            msgpack_pack_int64(pck, (long long)u_val);
+        }
+        else {
+            msgpack_pack_uint64(pck, u_val);
+        }
+    }
 }
 
 /* Sanitize incoming JSON string */
@@ -160,7 +200,7 @@ static char *tokens_to_msgpack(struct flb_pack_state *state,
     int arr_size;
     int records = 0;
     const char *p;
-    char *buf;
+    char *buf = NULL;
     const jsmntok_t *t;
     msgpack_packer pck;
     msgpack_sbuffer sbuf;
@@ -180,8 +220,9 @@ static char *tokens_to_msgpack(struct flb_pack_state *state,
     for (i = 0; i < arr_size ; i++) {
         t = &tokens[i];
 
-        if (t->start == -1 || t->end == -1 || (t->start == 0 && t->end == 0)) {
-            break;
+        if (t->start < 0 || t->end <= 0) {
+            msgpack_sbuffer_destroy(&sbuf);
+            return NULL;
         }
 
         if (t->parent == -1) {
@@ -198,7 +239,10 @@ static char *tokens_to_msgpack(struct flb_pack_state *state,
             msgpack_pack_array(&pck, t->size);
             break;
         case JSMN_STRING:
-            pack_string_token(state, js + t->start, flen, &pck);
+            if (pack_string_token(state, js + t->start, flen, &pck) < 0) {
+                msgpack_sbuffer_destroy(&sbuf);
+                return NULL;
+            }
             break;
         case JSMN_PRIMITIVE:
             p = js + t->start;
@@ -212,12 +256,7 @@ static char *tokens_to_msgpack(struct flb_pack_state *state,
                 msgpack_pack_nil(&pck);
             }
             else {
-                if (is_float(p, flen)) {
-                    msgpack_pack_double(&pck, atof(p));
-                }
-                else {
-                    msgpack_pack_int64(&pck, atoll(p));
-                }
+                pack_numeric_token(&pck, p, flen);
             }
             break;
         case JSMN_UNDEFINED:
@@ -285,6 +324,9 @@ static int pack_json_to_msgpack(const char *js, size_t len, char **buffer,
     ret = 0;
 
  flb_pack_json_end:
+    if (ret != 0 && buf) {
+        flb_free(buf);
+    }
     flb_pack_state_reset(&state);
     return ret;
 }
@@ -479,11 +521,11 @@ static int pack_print_fluent_record(size_t cnt, msgpack_unpacked result)
     flb_time_pop_from_msgpack(&tms, &result, &obj);
     flb_metadata_pop_from_msgpack(&metadata, &result, &obj);
 
-    fprintf(stdout, "[%zd] [%"PRId32".%09lu, ", cnt, (int32_t) tms.tm.tv_sec, tms.tm.tv_nsec);
+    fprintf(stdout, "[%zd] [[%"PRId32".%09lu, ", cnt, (int32_t) tms.tm.tv_sec, tms.tm.tv_nsec);
 
     msgpack_object_print(stdout, *metadata);
 
-    fprintf(stdout, ", ");
+    fprintf(stdout, "], ");
 
     msgpack_object_print(stdout, *obj);
 

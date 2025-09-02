@@ -20,7 +20,7 @@ RUN yum -y update && \
     yum install -y rpm-build curl ca-certificates gcc gcc-c++ cmake make bash \
     wget unzip systemd-devel wget flex bison \
     postgresql-libs postgresql-devel postgresql-server postgresql \
-    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel && \
+    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel pkgconf-pkg-config && \
     yum clean all
 
 # rockylinux/8.arm64v8 base image
@@ -37,7 +37,7 @@ RUN yum -y update && \
     yum install -y rpm-build curl ca-certificates gcc gcc-c++ cmake make bash \
     wget unzip systemd-devel wget flex bison \
     postgresql-libs postgresql-devel postgresql-server postgresql \
-    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel && \
+    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel pkgconf-pkg-config && \
     yum clean all
 
 # Need larger page size
@@ -54,7 +54,7 @@ RUN yum -y update && \
     yum install -y --allowerasing rpm-build curl ca-certificates gcc gcc-c++ cmake make bash \
     wget unzip systemd-devel wget flex bison \
     postgresql-libs postgresql-devel postgresql-server postgresql \
-    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel && \
+    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel pkgconf-pkg-config && \
     yum clean all
 
 # rockylinux/8.arm64v8 base image
@@ -71,7 +71,7 @@ RUN yum -y update && \
     yum install -y --allowerasing rpm-build curl ca-certificates gcc gcc-c++ cmake make bash \
     wget unzip systemd-devel wget flex bison \
     postgresql-libs postgresql-devel postgresql-server postgresql \
-    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel && \
+    cyrus-sasl-lib openssl openssl-libs openssl-devel libyaml-devel pkgconf-pkg-config && \
     yum clean all
 
 # Need larger page size
@@ -95,6 +95,7 @@ WORKDIR /source/fluent-bit/build/
 ARG CFLAGS
 ARG CMAKE_INSTALL_PREFIX=/opt/fluent-bit/
 ARG CMAKE_INSTALL_SYSCONFDIR=/etc/
+ARG FLB_SIMD=On
 ARG FLB_RELEASE=On
 ARG FLB_TRACE=On
 ARG FLB_SQLDB=On
@@ -108,6 +109,7 @@ ARG FLB_OUT_PGSQL=On
 
 RUN cmake -DCMAKE_INSTALL_PREFIX="$CMAKE_INSTALL_PREFIX" \
     -DCMAKE_INSTALL_SYSCONFDIR="$CMAKE_INSTALL_SYSCONFDIR" \
+    -DFLB_SIMD="$FLB_SIMD" \
     -DFLB_RELEASE="$FLB_RELEASE" \
     -DFLB_TRACE="$FLB_TRACE" \
     -DFLB_SQLDB="$FLB_SQLDB" \

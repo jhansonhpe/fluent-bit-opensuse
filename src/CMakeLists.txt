@@ -92,6 +92,7 @@ set(src
   flb_cfl_record_accessor.c
   flb_conditionals.c
   flb_mem.c
+  flb_blob_db.c
   )
 
 # Config format
@@ -106,6 +107,13 @@ if(FLB_HAVE_LIBYAML)
     config_format/flb_cf_yaml.c
     )
 endif()
+
+# OpenTelemetry Helpers
+set(src
+  ${src}
+  opentelemetry/flb_opentelemetry_logs.c
+  opentelemetry/flb_opentelemetry_utils.c
+)
 
 # Multiline subsystem
 add_subdirectory(multiline)
@@ -348,10 +356,6 @@ endif()
 
 if(FLB_UNICODE_ENCODER)
   add_subdirectory(simdutf)
-  set(src
-    ${src}
-    "flb_unicode.c"
-    )
 endif()
 
 # WAMRC compiler
@@ -456,6 +460,10 @@ if(FLB_RECORD_ACCESSOR)
     )
 endif()
 
+set(FLB_DEPS
+  ${FLB_DEPS}
+  )
+
 # Stream Processor
 if(FLB_STREAM_PROCESSOR)
   set(FLB_DEPS
@@ -463,6 +471,17 @@ if(FLB_STREAM_PROCESSOR)
     flb-sp
     )
 endif()
+
+# Unicode Conversions
+add_subdirectory(unicode)
+set(FLB_DEPS
+  ${FLB_DEPS}
+  flb-conv
+  )
+set(src
+  ${src}
+  flb_unicode.c
+  )
 
 if (MSVC)
 set(flb_rc_files
@@ -548,6 +567,11 @@ if(FLB_BINARY)
   endif()
 
   target_link_libraries(fluent-bit-bin fluent-bit-static ${CMAKE_THREAD_LIBS_INIT})
+
+  # KAFKA SPECIFIC
+  if(FLB_SASL_ENABLED)
+    target_link_libraries(fluent-bit-bin sasl2)
+  endif()
 
   set_target_properties(fluent-bit-bin
     PROPERTIES

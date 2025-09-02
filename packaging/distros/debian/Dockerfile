@@ -17,6 +17,11 @@ ENV DEBIAN_FRONTEND="noninteractive" \
 ARG CMAKE_VERSION="3.31.6"
 ARG CMAKE_URL="https://github.com/Kitware/CMake/releases/download"
 
+# Patch to archive.debian.org
+# https://lists.debian.org/debian-devel-announce/2025/06/msg00001.html
+RUN sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list && \
+    sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
+
 # hadolint ignore=DL3008,DL3015
 RUN apt-get -qq update && \
     apt-get install -y curl ca-certificates build-essential \
@@ -42,6 +47,11 @@ COPY --from=multiarch-aarch64 /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64
 
 ARG CMAKE_VERSION="3.31.6"
 ARG CMAKE_URL="https://github.com/Kitware/CMake/releases/download"
+
+# Patch to archive.debian.org
+# https://lists.debian.org/debian-devel-announce/2025/06/msg00001.html
+RUN sed -i s/deb.debian.org/archive.debian.org/g /etc/apt/sources.list && \
+    sed -i s/security.debian.org/archive.debian.org/g /etc/apt/sources.list
 
 # hadolint ignore=DL3008,DL3015
 RUN apt-get -qq update && \
@@ -175,6 +185,7 @@ WORKDIR /tmp/fluent-bit/build/
 ARG CFLAGS="-std=gnu99"
 ARG CMAKE_INSTALL_PREFIX=/opt/fluent-bit/
 ARG CMAKE_INSTALL_SYSCONFDIR=/etc/
+ARG FLB_SIMD=On
 ARG FLB_RELEASE=On
 ARG FLB_TRACE=On
 ARG FLB_SQLDB=On
@@ -187,6 +198,7 @@ ARG FLB_CHUNK_TRACE=On
 ENV CFLAGS=$CFLAGS
 RUN cmake -DCMAKE_INSTALL_PREFIX="$CMAKE_INSTALL_PREFIX" \
     -DCMAKE_INSTALL_SYSCONFDIR="$CMAKE_INSTALL_SYSCONFDIR" \
+    -DFLB_SIMD="$FLB_SIMD" \
     -DFLB_RELEASE="$FLB_RELEASE" \
     -DFLB_TRACE="$FLB_TRACE" \
     -DFLB_SQLDB="$FLB_SQLDB" \

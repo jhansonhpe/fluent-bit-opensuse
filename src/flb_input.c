@@ -56,16 +56,20 @@ pthread_key_t libco_in_param_key;
 #define protcmp(a, b)  strncasecmp(a, b, strlen(a))
 
 /*
- * Ring buffer size: we make space for 512 entries that each input instance can
- * use to enqueue data. Note that this value is fixed and only affect input plugins
- * which runs in threaded mode (separate thread)
+ * Ring buffer capacity: by default we make space for 1024 entries that each
+ * input instance can use to enqueue data. The capacity can be customized per
+ * input instance through the 'thread.ring_buffer.capacity' property. The value
+ * represents the number of slots and is converted to bytes when the ring buffer
+ * is created. This affects only input plugins running in threaded mode.
  *
  * Ring buffer window: the current window size is set to 5% which means that the
- * ring buffer will emit a flush request whenever there are 51 records or more
- * awaiting to be consumed.
+ * ring buffer will emit a flush request whenever the window threshold is reached.
+ * The window percentage can be tuned per input instance using the
+ * 'thread.ring_buffer.window' property.
  */
 
-#define FLB_INPUT_RING_BUFFER_SIZE   (sizeof(void *) * 1024)
+#define FLB_INPUT_RING_BUFFER_CAPACITY 1024
+#define FLB_INPUT_RING_BUFFER_SIZE   (sizeof(void *) * FLB_INPUT_RING_BUFFER_CAPACITY)
 #define FLB_INPUT_RING_BUFFER_WINDOW (5)
 
 /* config map to register options available for all input plugins */
@@ -122,6 +126,16 @@ struct flb_config_map input_global_properties[] = {
         FLB_CONFIG_MAP_BOOL, "threaded", "false",
         0, FLB_FALSE, 0,
         "Enable threading on an input"
+    },
+    {
+        FLB_CONFIG_MAP_INT, "thread.ring_buffer.capacity", STR(FLB_INPUT_RING_BUFFER_CAPACITY),
+        0, FLB_FALSE, 0,
+        "Set custom ring buffer capacity when the input runs in threaded mode"
+    },
+    {
+        FLB_CONFIG_MAP_INT, "thread.ring_buffer.window", STR(FLB_INPUT_RING_BUFFER_WINDOW),
+        0, FLB_FALSE, 0,
+        "Set custom ring buffer window percentage for threaded inputs"
     },
 
     {0}
@@ -404,8 +418,12 @@ struct flb_input_instance *flb_input_new(struct flb_config *config,
 
         }
 
+        /* set default ring buffer size and window */
+        instance->ring_buffer_size = FLB_INPUT_RING_BUFFER_SIZE;
+        instance->ring_buffer_window = FLB_INPUT_RING_BUFFER_WINDOW;
+
         /* allocate a ring buffer */
-        instance->rb = flb_ring_buffer_create(FLB_INPUT_RING_BUFFER_SIZE);
+        instance->rb = flb_ring_buffer_create(instance->ring_buffer_size);
         if (!instance->rb) {
             flb_error("instance %s could not initialize ring buffer",
                       flb_input_name(instance));
@@ -703,6 +721,31 @@ int flb_input_set_property(struct flb_input_instance *ins,
         }
 
         ins->is_threaded = enabled;
+    }
+    else if (prop_key_check("thread.ring_buffer.capacity", k, len) == 0 && tmp) {
+        ret = atoi(tmp);
+        flb_sds_destroy(tmp);
+        if (ret <= 0) {
+            return -1;
+        }
+        ins->ring_buffer_size = (size_t) ret * sizeof(void *);
+        if (ins->rb) {
+            flb_ring_buffer_destroy(ins->rb);
+            ins->rb = flb_ring_buffer_create(ins->ring_buffer_size);
+            if (!ins->rb) {
+                flb_error("instance %s could not initialize ring buffer", flb_input_name(ins));
+                return -1;
+            }
+        }
+    }
+    else if (prop_key_check("thread.ring_buffer.window", k, len) == 0 && tmp) {
+        ret = atoi(tmp);
+        flb_sds_destroy(tmp);
+        if (ret <= 0 || ret > 100) {
+            flb_error("[input] thread.ring_buffer.window must be between 1 and 100");
+            return -1;
+        }
+        ins->ring_buffer_window = (uint8_t) ret;
     }
     else if (prop_key_check("storage.pause_on_chunks_overlimit", k, len) == 0 && tmp) {
         ret = flb_utils_bool(tmp);
@@ -1194,6 +1237,34 @@ int flb_input_instance_init(struct flb_input_instance *ins,
         cmt_counter_set(ins->cmt_memrb_dropped_bytes, ts, 0, 1, (char *[]) {name});
     }
 
+    /* fluentbit_input_ring_buffer_writes_total */
+    ins->cmt_ring_buffer_writes = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_writes_total",
+                            "Number of ring buffer writes.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_writes, ts, 0, 1, (char *[]) {name});
+
+    /* fluentbit_input_ring_buffer_retries_total */
+    ins->cmt_ring_buffer_retries = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_retries_total",
+                            "Number of ring buffer retries.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_retries, ts, 0, 1, (char *[]) {name});
+
+
+    /* fluentbit_input_ring_buffer_retry_failures_total */
+    ins->cmt_ring_buffer_retry_failures = \
+        cmt_counter_create(ins->cmt,
+                            "fluentbit", "input",
+                            "ring_buffer_retry_failures_total",
+                            "Number of ring buffer retry failures.",
+                            1, (char *[]) {"name"});
+    cmt_counter_set(ins->cmt_ring_buffer_retry_failures, ts, 0, 1, (char *[]) {name});
+
     /* OLD Metrics */
     ins->metrics = flb_metrics_create(name);
     if (ins->metrics) {
@@ -1319,10 +1390,8 @@ int flb_input_instance_init(struct flb_input_instance *ins,
                 return -1;
             }
 
-            //ins->notification_channel = ins->thi->notification_channels[1];
-
             /* register the ring buffer */
-            ret = flb_ring_buffer_add_event_loop(ins->rb, config->evl, FLB_INPUT_RING_BUFFER_WINDOW);
+            ret = flb_ring_buffer_add_event_loop(ins->rb, config->evl, ins->ring_buffer_window);
             if (ret) {
                 flb_error("failed while registering ring buffer events on input %s",
                           ins->name);
@@ -1338,6 +1407,7 @@ int flb_input_instance_init(struct flb_input_instance *ins,
             }
 
             ins->notification_channel = config->notification_channels[1];
+            ins->processor->notification_channel = ins->notification_channel;
 
             ret = p->cb_init(ins, config, ins->data);
             if (ret != 0) {
@@ -1345,16 +1415,14 @@ int flb_input_instance_init(struct flb_input_instance *ins,
                           ins->name);
                 return -1;
             }
+
+            ret = flb_processor_init(ins->processor);
+            if (ret == -1) {
+                flb_error("failed initialize processors for input %s",
+                          ins->name);
+                return -1;
+            }
         }
-    }
-
-    ins->processor->notification_channel = ins->notification_channel;
-
-    /* initialize processors */
-    ret = flb_processor_init(ins->processor);
-    if (ret == -1) {
-        flb_error("[input %s] error initializing processor, aborting startup", ins->name);
-        return -1;
     }
 
     return 0;
@@ -1581,7 +1649,11 @@ static struct flb_input_collector *collector_create(int type,
         coll->evl = thi->evl;
     }
     else {
-        coll->evl = config->evl;
+        /* We need to obtain the event loop from the TLS when
+         * creating collectors for non threaded plugins running
+         * under a threaded plugin.
+         */
+        coll->evl = flb_engine_evl_get();
     }
 
     /*
@@ -1935,7 +2007,6 @@ int flb_input_collector_destroy(struct flb_input_collector *coll)
     if (coll->type == FLB_COLLECT_TIME) {
         if (coll->fd_timer > 0) {
             mk_event_timeout_destroy(config->evl, &coll->event);
-            mk_event_closesocket(coll->fd_timer);
         }
     }
     else {
@@ -1950,7 +2021,6 @@ int flb_input_collector_destroy(struct flb_input_collector *coll)
 int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
 {
     int ret;
-    flb_pipefd_t fd;
     struct flb_input_collector *coll;
 
     coll = get_collector(coll_id, in);
@@ -1971,10 +2041,8 @@ int flb_input_collector_pause(int coll_id, struct flb_input_instance *in)
          * Note: Invalidate fd_timer first in case closing a socket
          * invokes another event.
          */
-        fd = coll->fd_timer;
         coll->fd_timer = -1;
         mk_event_timeout_destroy(coll->evl, &coll->event);
-        mk_event_closesocket(fd);
     }
     else if (coll->type & (FLB_COLLECT_FD_SERVER | FLB_COLLECT_FD_EVENT)) {
         ret = mk_event_del(coll->evl, &coll->event);

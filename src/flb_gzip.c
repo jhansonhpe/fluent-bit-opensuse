@@ -562,9 +562,8 @@ int flb_gzip_uncompress_multi(void *in_data, size_t in_len,
         if (status == MZ_OK) {
             /* Out of space in our buffer. Create a new one. */
             buffer_lengths[buffer_index] = FLB_GZIP_BUFFER_SIZE - stream.avail_out;
-            buffer_index++;
 
-            if (buffer_index >= FLB_GZIP_MAX_BUFFERS) {
+            if (buffer_index >= FLB_GZIP_MAX_BUFFERS - 1) {
                 flb_error("[gzip] maximum decompression size reached (~100 MB)");
 
                 mz_inflateEnd(&stream);
@@ -574,6 +573,8 @@ int flb_gzip_uncompress_multi(void *in_data, size_t in_len,
                 return -1;
             }
 
+            /* Process to increment buffer index for valid conditions */
+            buffer_index++;
             buffers[buffer_index] = flb_malloc(FLB_GZIP_BUFFER_SIZE);
 
             if (!buffers[buffer_index]) {
@@ -890,14 +891,14 @@ static int flb_gzip_decompressor_process_body_chunk(
         return FLB_DECOMPRESSOR_FAILURE;
     }
 
-    processed_bytes  = context->input_buffer_length;;
+    processed_bytes  = context->input_buffer_length;
     processed_bytes -= inner_context->miniz_stream.avail_in;
 
     *output_length  -= inner_context->miniz_stream.avail_out;
 
 #ifdef FLB_DECOMPRESSOR_ERASE_DECOMPRESSED_DATA
     if (processed_bytes > 0) {
-        memset(context->read_buffer, processed_bytes);
+        memset(context->read_buffer, 0, processed_bytes);
     }
 #endif
 

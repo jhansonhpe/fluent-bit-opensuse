@@ -30,6 +30,7 @@
 #include <fluent-bit/flb_input_plugin.h>
 #include <fluent-bit/flb_storage.h>
 #include <fluent-bit/flb_time.h>
+#include <fluent-bit/flb_lib.h>
 #include <fluent-bit/flb_router.h>
 #include <fluent-bit/flb_task.h>
 #include <fluent-bit/flb_routes_mask.h>
@@ -938,6 +939,7 @@ struct flb_input_chunk *flb_input_chunk_create(struct flb_input_instance *in, in
     ic->in = in;
     ic->stream_off = 0;
     ic->task = NULL;
+    ic->create_time = flb_time_now();
 #ifdef FLB_HAVE_METRICS
     ic->total_records = 0;
 #endif
@@ -1861,6 +1863,11 @@ static int append_to_ring_buffer(struct flb_input_instance *ins,
     int retry_limit = 10;
     struct input_chunk_raw *cr;
 
+    if (buf_size == 0) {
+        flb_plg_debug(ins, "skip ingesting data with 0 bytes");
+        return -1;
+    }
+
     cr = flb_calloc(1, sizeof(struct input_chunk_raw));
     if (!cr) {
         flb_errno();
@@ -1908,6 +1915,10 @@ retry:
     if (retries >= retry_limit) {
         flb_plg_error(ins, "could not enqueue records into the ring buffer");
         destroy_chunk_raw(cr);
+
+        /* update failed retries counter */
+        cmt_counter_add(ins->cmt_ring_buffer_retry_failures, cfl_time_now(),
+                        1, 1, (char *[]) {(char *) flb_input_name(ins)});
         return -1;
     }
 
@@ -1917,11 +1928,21 @@ retry:
         flb_plg_debug(ins, "failed buffer write, retries=%i\n",
                       retries);
 
+        /* if the ring buffer is full, we need to retry, update the counters */
+        cmt_counter_add(ins->cmt_ring_buffer_retries, cfl_time_now(),
+                        1, 1, (char *[]) {(char *) flb_input_name(ins)});
+
+
         /* sleep for 100000 microseconds (100 milliseconds) */
         usleep(100000);
         retries++;
+
         goto retry;
     }
+
+    /* update successful writes */
+    cmt_counter_add(ins->cmt_ring_buffer_writes, cfl_time_now(),
+                    1, 1, (char *[]) {(char *) flb_input_name(ins)});
 
     return 0;
 }
