@@ -26,9 +26,6 @@ FROM --platform=arm64 opensuse/leap as opensuse-leap.arm64v8-base
 
 COPY --from=multiarch-aarch64 /usr/bin/qemu-aarch64-static /usr/bin/qemu-aarch64-static
 
-# Add for the YAML development libraries
-RUN sed -i 's/enabled=0/enabled=1/g' /etc/yum.repos.d/Rocky-PowerTools.repo
-
 # hadolint ignore=DL3033
 RUN zypper up -y  && \
     zypper install -y rpm-build curl ca-certificates gcc gcc-c++ cmake3-full make bash \
@@ -58,6 +55,7 @@ WORKDIR /source/fluent-bit/build/
 ARG CFLAGS
 ARG CMAKE_INSTALL_PREFIX=/opt/fluent-bit/
 ARG CMAKE_INSTALL_SYSCONFDIR=/etc/
+ARG FLB_SIMD=On
 ARG FLB_RELEASE=On
 ARG FLB_TRACE=On
 ARG FLB_SQLDB=On
@@ -71,6 +69,7 @@ ARG FLB_OUT_PGSQL=On
 
 RUN cmake -DCMAKE_INSTALL_PREFIX="$CMAKE_INSTALL_PREFIX" \
     -DCMAKE_INSTALL_SYSCONFDIR="$CMAKE_INSTALL_SYSCONFDIR" \
+    -DFLB_SIMD="$FLB_SIMD" \
     -DFLB_RELEASE="$FLB_RELEASE" \
     -DFLB_TRACE="$FLB_TRACE" \
     -DFLB_SQLDB="$FLB_SQLDB" \
@@ -85,4 +84,4 @@ RUN cmake -DCMAKE_INSTALL_PREFIX="$CMAKE_INSTALL_PREFIX" \
     ../
 
 VOLUME [ "/output" ]
-CMD [ "/bin/bash", "-c", "make --no-print-directory -j 4 && cpack -G RPM && cp *.rpm /output/ && cp /source/fluent-bit/build/_CPack_Packages/Linux/RPM/SPECS/fluent-bit.spec /output/" ]
+CMD [ "/bin/bash", "-c", "make --no-print-directory -j 4 && cpack -G RPM && cp *.rpm /output/" ]
